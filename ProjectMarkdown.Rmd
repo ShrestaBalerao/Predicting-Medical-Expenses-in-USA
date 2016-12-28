@@ -1,0 +1,202 @@
+---
+title: "Project1"
+author: "Rangers"
+date: "October 15, 2016"
+output: html_document
+---
+
+necessary packages
+```{r cars}
+library(dplyr)
+library(plotly)
+library(ggplot2)
+library(Ecdat)
+library(caTools)
+library(mypackage)
+library(leaps)
+library(ROCR)
+data("MedExp")
+```
+changing the target numerical variable to a categorical variable
+```{r}
+MedExp$medCategory=ifelse(MedExp$med>median(MedExp$med),0,1)
+```
+#plotting a linear model with age, with polynomial degree of 3
+```{r}
+linearModel=lm(med^(1/5)~poly(age,degree = 3),data = MedExp[,-16])
+plot(linearModel)
+predictMed=predict(linearModel,data=MedExp[,-16],se=T)
+se.bands=cbind(predictMed$fit+2*predictMed$se,predictMed$fit-2*predictMed$se)
+plot(MedExp$age,MedExp$med^(1/5),col='darkgrey',xlab="Age",ylab="medical expense",main="regressor on Medical Expenses with Age")
+lines(MedExp$med^(1/5),MedExp$fit,lwd=2,col="blue")
+```
+non linearity with logistic regresion
+```{r}
+split=sample.split(MedExp$medCategory,SplitRatio = 0.4)
+MedExpTrain=MedExp[split==TRUE,]
+MedExpValid=MedExp[split==FALSE,]
+medPolyglm=glm(medCategory~poly(age,3),data=MedExpTrain,family=binomial)
+summary(medPolyglm)
+agelims=range(MedExp$age)
+age.grid=seq(from=agelims[1],to=agelims[2] )
+predictAge=predict(medPolyglm,newdata = list(age=age.grid),se=T)
+se.bands=predictAge$fit+cbind(medPolyglm=0,lower=-2*predictAge$se.fit,upper=2*predictAge$se.fit)
+se.bands[1:5,]
+prob.bands=exp(se.bands)/(1+exp(se.bands))
+matplot(age.grid,prob.bands,col='blue',lwd=c(2,1,1),lty=c(1,2,2),type="l",ylim=c(0.2,.7),xlab="age",ylab="predicted probabilities")
+```
+predictions on actual data 
+calling our package for computing metrics
+using ROCR package for computing metrics
+```{r}
+predictActual=predict(medPolyglm,newdata = MedExpValid,type="response")
+confusionMetrics(MedExpValid$medCategory,predictActual,threshold = 0.5,k=1)
+#creating the prrediction object from ROCR package
+predictionObject=prediction(predictActual,MedExpValid$medCategory)
+performanceObject=performance(predictionObject, "sens", "fpr")
+plot(performanceObject,colorize=T,print.cutoffs.at=seq(0,1,0.2),text.adj=c(2,1),main="ROC curve of the fit");
+```
+subset selection using leaps package
+```{r}
+medSubsets=regsubsets(medCategory~age+lc+idp+idp
+                      +fmde+physlim+ndisease+health+linc+
+                        +lfam+educdec+sex+child+black,
+                      data = MedExpTrain,nvmax = 17,method ="forward" )
+plot(medSubsets)
+summaryObject=summary(medSubsets)
+names(summaryObject)
+summaryObject%>%plot_ly( y = cp,name="cp statistic",mode = 'markers+lines') %>%
+  add_trace(y = summaryObject$bic, name = 'BIC', mode = 'markers+lines')
+```
+model selections with lasso and ridge classifiers
+we pass inputs as a matrix 
+model.matrix converts all the qualitative variables into dummy variables
+```{r}
+library(glmnet)
+independentVar=model.matrix(medCategory~.-med,data = MedExp)
+dependentVar=MedExp$medCategory
+```
+alpha=0----> ridge regression using L2 Norm
+alpha=1----> Lasso regression using L1 Norm
+we will use lamdba parameter as tuning parameter with a grid of values
+grid values from 10 power 10 to -2
+standardize=TRUE automatically
+dimensions are parameters*grid values for lamba
+```{r}
+Lgrid=10^seq(10,-2,length=100)
+ridgeModel=glmnet(independentVar,dependentVar,family = "binomial",lambda = Lgrid,alpha = 0)
+dim(coef(ridgeModel))
+``` 
+interpreting
+when lambda is large coefficients will be as small as they can be
+when lambda is small coefficients will be close to normal logistic regression
+```{r}
+ridgeModel$lambda[100]
+coef(ridgeModel)[,100]
+#l2 norm calculation
+sqrt(sum(coef(ridgeModel)[-(1:2),100])^2)
+#large lambda
+ridgeModel$lambda[10]
+coef(ridgeModel)[,10]
+#l2 norm calculation
+sqrt(sum(coef(ridgeModel)[-(1:2),10])^2)
+```
+plotting the model
+```{r}
+plot.glmnet(ridgeModel)
+```
+predictions using train and validation
+using cross validation
+sample predictions on one model
+```{r}
+trainIndependentVar=model.matrix(medCategory~.-med,data = MedExpTrain)
+trainDependentVar=MedExpTrain$medCategory
+testIndependentVar=model.matrix(medCategory~.-med,data = MedExpValid)
+testDependentVar=MedExpValid$medCategory
+ridgeTrain=glmnet(trainIndependentVar,trainDependentVar,alpha = 0,lambda = Lgrid)
+predictTest=predict(ridgeTrain,s = 10,newx =testIndependentVar)
+confusionMetrics(target = testDependentVar,predicted =predictTest,threshold = 0.5,k = 16)
+
+```
+cross validation using ridge
+10 fold cross validation by default
+```{r}
+cvRidgeDeviance=cv.glmnet(trainIndependentVar,trainDependentVar,family="binomial",
+                  alpha=0,nfolds = 10,type.measure="deviance")
+plot(cvRidgeDeviance)
+cvRidgeAuc=cv.glmnet(trainIndependentVar,trainDependentVar,family="binomial",
+                  alpha=0,nfolds = 10,type.measure="auc")
+plot(cvRidgeAuc)
+```
+getting the best statistics to compute the error
+```{r}
+bestLambda=cvRidgeAuc$lambda.min
+pedictCV=predict.cv.glmnet(cvRidgeAuc,s=bestLambda,
+                        newx = testIndependentVar,type = "response")
+confusionMetrics(target = testDependentVar,predicted =pedictCV,threshold = 0.3,k = 16)
+coef(cvRidgeAuc)
+```
+fitting lasso 
+L1 Norm
+```{r}
+lassoTrain=glmnet(trainIndependentVar,trainDependentVar,alpha = 1,lambda = Lgrid,family="binomial")
+plot.glmnet(lassoTrain,xvar="lambda",type,label=TRUE)
+lassoTrain$lambda[100]
+coef(lassoTrain)[,100]
+predictTest=predict(lassoTrain,s = 0.01,newx =testIndependentVar,type = "response")
+confusionMetrics(target = testDependentVar,predicted =predictTest,threshold = 0.5,k = 18)
+```
+interpreting
+when lambda is large coefficients will be mostly zero 
+when lambda is small coefficients will be close to least squares
+```{r}
+lassoTrain$lambda[100]
+coef(lassoTrain)[,100]
+#1 norm calculation
+sum(coef(lassoTrain)[-(1:2),100])
+#large lambda
+lassoTrain$lambda[10]
+coef(lassoTrain)[,10]
+#l2 norm calculation
+coef(lassoTrain)[-(1:2),10]
+```
+cross validation using lasso
+10 fold cross validation by default
+```{r}
+cvLassoDeviance=cv.glmnet(trainIndependentVar,trainDependentVar,family="binomial",
+                  alpha=1,nfolds = 10,type.measure="deviance")
+plot(cvLassoDeviance)
+cvLassoAuc=cv.glmnet(trainIndependentVar,trainDependentVar,family="binomial",
+                  alpha=1,nfolds = 10,type.measure="auc")
+plot.cv.glmnet(cvLassoAuc)
+```
+getting the best statistics to compute the error
+```{r}
+bestLambda=cvLassoAuc$lambda.1se
+summary(cvLassoAuc$lambda.1se)
+pedictCV=predict.cv.glmnet(cvLassoAuc,s=bestLambda,
+                        newx = testIndependentVar,type = "response")
+confusionMetrics(target = testDependentVar,predicted =pedictCV,threshold = 0.5,k = 16)
+lasso.coef=predict(cvLassoAuc ,type ="coefficients",s=bestLambda )[1:18,]
+coef(cvLassoAuc)
+```
+Model for the regression , ridge regression
+```{r}
+x=MedExp$med
+x=ifelse(MedExp$med>mean(MedExp$med),mean(MedExp$med),MedExp$med)
+independentVar=model.matrix(med~ndisease+age+sex+physlim+linc+health,data = MedExp)
+Lgrid=10^seq(10,-2,length=100)
+glmCVRidge=cv.glmnet(independentVar,x,alpha = 0,lambda = Lgrid)
+plot(glmCVRidge)
+glmCVRidge$lambda[100]
+bestLambda=glmCVRidge$lambda.min
+coef(glmCVRidge)[,bestLambda]
+```
+fitting models with step functions
+```{r}
+medPolyglm=glm(medCategory~age+lc+idp+idp+fmde+physlim+ndisease+health+linc+lfam+educdec+sex+child+black,
+               data=MedExp,subset =split[split==TRUE],family=binomial)
+predictActual=predict(medPolyglm,newdata =MedExpValid,type="response")
+table(MedExpValid$medCategory,predictActual>0.3)
+confusionMetrics(MedExpValid$medCategory,predictActual,threshold = 0.3,k = 19)
+```
